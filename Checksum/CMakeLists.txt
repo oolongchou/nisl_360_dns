@@ -4,6 +4,7 @@ set(CMAKE_CXX_STANDARD 14)
 set(SOURCE_FILES ReChecksum.cpp)
 
 link_directories(/usr/local/lib)
+include_directories(/usr/local/include/pcapplusplus)
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DDEBUG")
 add_executable(Checksum ReChecksum.cpp)
 target_link_libraries(Checksum pcap)

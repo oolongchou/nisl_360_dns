@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 14)
 set(SOURCE_FILES DomainMap.cpp)
 
 link_directories(/usr/local/lib)
+include_directories(/usr/local/include/pcapplusplus)
 include_directories(/usr/local/include)
 add_executable(DomainMap DomainMap.cpp)
 target_link_libraries(DomainMap Pcap++)

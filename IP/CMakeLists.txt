@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 14)
 
 link_directories(/usr/local/lib)
 include_directories(/usr/local/include)
+include_directories(/usr/local/include/pcapplusplus)
 add_executable(IPMap IPMap.cpp)
 target_link_libraries(IPMap Pcap++)
 target_link_libraries(IPMap Packet++)
