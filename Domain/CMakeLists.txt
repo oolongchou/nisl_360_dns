@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.13)
+project(DomainMap)
+
+set(CMAKE_CXX_STANDARD 14)
+set(SOURCE_FILES DomainMap.cpp)
+
+link_directories(/usr/local/lib)
+include_directories(/usr/local/include)
+add_executable(DomainMap DomainMap.cpp)
+target_link_libraries(DomainMap Pcap++)
+target_link_libraries(DomainMap Packet++)
+target_link_libraries(DomainMap Common++)
+target_link_libraries(DomainMap pcap)
+target_link_libraries(DomainMap ssl)
+target_link_libraries(DomainMap crypto)
+target_link_libraries(DomainMap jsoncpp)

@@ -1,0 +1,10 @@
+{
+  "ToLowercase" : true,
+  "Deletions": [
+    "arpa"
+  ],
+  "Constants": [],
+  "Replacements": {
+    "edu.cn" : "com.cn"
+  }
+}
