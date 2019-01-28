@@ -3,7 +3,6 @@ project(Checksum)
 set(CMAKE_CXX_STANDARD 14)
 set(SOURCE_FILES ReChecksum.cpp)
 
-include_directories(../include)
 link_directories(/usr/local/lib)
 add_compile_definitions(DEBUG)
 add_executable(Checksum ReChecksum.cpp)
