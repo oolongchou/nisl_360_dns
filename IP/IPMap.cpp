@@ -7,12 +7,14 @@
 #include<RawPacket.h>
 #include<Packet.h>
 #include<IPv4Layer.h>
+#include<DnsLayer.h>
 #include<json/json.h>
 #include<PcapFileDevice.h>
 
 const char* Usage = \
 "IPMap [input] [output] [setting path]\n"
-"Map all ips according to the specific settings.\n";
+"Map all ips according to the specific settings.\n"
+"Implemented: src and dst in ip layer, ip of A record answer in dns layer\n";
 
 typedef struct _config{
     std::map<u_int32_t, u_int32_t> ip_map;
@@ -79,6 +81,17 @@ int main(int argc, char** argv) {
                 ipv4->setSrcIpAddress(pcpp::IPv4Address(config->ip_map[src]));
             if(config->ip_map.count(dst) == 1)
                 ipv4->setDstIpAddress(pcpp::IPv4Address(config->ip_map[dst]));
+            auto dns = pkt.getLayerOfType<pcpp::DnsLayer>();
+            for(auto it = dns->getFirstAnswer(); it != nullptr; it = dns->getNextAnswer(it)){
+                auto dns_type = it->getDnsType();
+                if(dns_type == pcpp::DnsType::DNS_TYPE_A){
+                    u_int32_t answer_ip = pcpp::IPv4Address(it->getDataAsString()).toInt();
+                    if(config->ip_map.count(answer_ip) == 1)
+                        it->setData(pcpp::IPv4Address(config->ip_map[answer_ip]).toString());
+                }else if(dns_type == pcpp::DnsType::DNS_TYPE_AAAA){
+                    printf("Warning: ipv6 answer detected in %lld packet.\n", count);
+                }
+            }
         }else
             printf("Warning: %lld packet doesn't have an ipv4 layer.\n", count);
         write_count++;
