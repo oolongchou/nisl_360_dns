@@ -67,7 +67,7 @@ bool plain_match(const std::string& needle, const std::vector<std::string>& hays
     return false;
 }
 
-std::string process_domain(const std::string& domain, const std::map<std::string, std::string>& replacements){
+std::string replace_domain(const std::string &domain, const std::map<std::string, std::string> &replacements){
     std::string result;
     std::string new_suffix;
     bool to_replace = false;
@@ -180,28 +180,78 @@ int main(int argc, char** argv){
                 to_delete.erase(tid);
                 to_write = false;
             }else {
-                for (auto query = dns->getFirstQuery(); query != nullptr; query = dns->getNextQuery(query)) {
-                    std::string domain = query->getName();
-                    if(config->to_lowercase)
-                        std::transform(domain.begin(), domain.end(), domain.begin(), ::tolower);
+                // not elegant at all. :(
+                auto delete_if_match = [&](const std::string& domain, const PConfig& config){
                     if (plain_match(domain, config->deletions)) {
                         to_write = false;
                         to_delete.insert(dns->getDnsHeader()->transactionID);
-                        continue;
+                        return true;
                     }
-                    if(plain_match(domain, config->constants)) {
-                        map[domain] = domain;
-                        break;
-                    }
+                    return false;
+                };
+                auto get_hashed_domain = [&](const std::string& domain, const PConfig& config){
                     std::string hashed;
                     if (map.isMember(domain))
                         hashed = map[domain].asString();
-                    else {
-                        hashed = process_domain(domain, config->replacements);
-                        map[domain] = hashed;
+                    else
+                        hashed = replace_domain(domain, config->replacements);
+                    return hashed;
+                };
+                auto process_domain = [&](std::string& domain, const PConfig& config, std::string& hashed){
+                    if(config->to_lowercase)
+                        std::transform(domain.begin(), domain.end(), domain.begin(), ::tolower);
+                    if (delete_if_match(domain, config))
+                        return false;
+                    if(plain_match(domain, config->constants)) {
+                        hashed = domain;
+                        return true;
                     }
-                    query->setName(hashed);
+                    hashed = get_hashed_domain(domain, config);
+                    return true;
+                };
+                for (auto query = dns->getFirstQuery(); query != nullptr; query = dns->getNextQuery(query)) {
+                    auto domain = query->getName();
+                    std::string hashed;
+                    if(process_domain(domain, config, hashed)) {
+                        map[domain] = hashed;
+                        query->setName(hashed);
+                    }
                 }
+                for(auto answer = dns->getFirstAnswer(); answer != nullptr; answer = dns->getNextAnswer(answer)) {
+                    auto domain = answer->getName();
+                    auto type = answer->getDnsType();
+                    switch (type) {
+                        case pcpp::DnsType::DNS_TYPE_CNAME: {
+                            auto cname = answer->getDataAsString();
+                            std::string hashed;
+                            if (process_domain(cname, config, hashed)) {
+                                map[domain] = hashed;
+                                answer->setData(hashed);
+                            }
+                        }
+                            break;
+                        case pcpp::DnsType::DNS_TYPE_NSEC:
+                        case pcpp::DnsType::DNS_TYPE_NSEC3:
+                        case pcpp::DnsType::DNS_TYPE_NSEC3PARAM:
+                        case pcpp::DnsType::DNS_TYPE_RRSIG: {
+                            // not implemented.
+                            auto dnssec = answer->getDataAsString();
+                            printf("%lld packet finds DNSSEC:%s\n", count, dnssec.c_str());
+                            break;
+                        }
+                        case pcpp::DnsType::DNS_TYPE_A:
+                        case pcpp::DnsType::DNS_TYPE_AAAA:
+                            // ignore normal ipv4 and ipv6 response.
+                            break;
+                        case pcpp::DNS_TYPE_NS:
+                            // not implemented.
+                            break;
+                        default:
+                            printf("the answer of %lld packet with type id %d isn't processed.\n", count, type);
+                    }
+                }
+                // now we should go to authoritative servers and additional records.
+                // to be implemented.
             }
         }
         if(to_write) {
