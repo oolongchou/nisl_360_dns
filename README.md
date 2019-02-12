@@ -15,7 +15,7 @@ My programs depends on these libraries:
 On Macos:
 
 ```bash
-brew insall jsoncpp libpcap pcapplusplus openssl
+brew install jsoncpp libpcap pcapplusplus openssl
 ln -s /usr/local/opt/openssl/lib/libcrypto.1.0.0.dylib /usr/local/lib/
 ln -s /usr/local/opt/openssl/lib/libcrypto.a /usr/local/lib/
 ln -s /usr/local/opt/openssl/lib/libssl.a /usr/local/lib/
