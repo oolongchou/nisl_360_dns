@@ -4,6 +4,7 @@
 #include<ctime>
 #include<map>
 #include<memory>
+#include<random>
 #include<RawPacket.h>
 #include<Packet.h>
 #include<IPv4Layer.h>
@@ -17,10 +18,12 @@ const char* Usage = \
 "Implemented: src and dst in ip layer, ip of A record answer in dns layer\n";
 
 typedef struct _config{
-    std::map<u_int32_t, u_int32_t> ip_map;
+    std::map<u_int32_t, u_int32_t> ipv4_map;
 } Config;
 
 typedef std::shared_ptr<Config> PConfig;
+
+static Json::Value map_json;
 
 PConfig read_config(const char* path){
     std::fstream fs(path, std::ios::in);
@@ -36,9 +39,10 @@ PConfig read_config(const char* path){
         return nullptr;
     }
     for(auto& name : config_json.getMemberNames()){
+        map_json[name] = config_json[name].asString();
         in_addr_t src = pcpp::IPv4Address(name).toInt();
         in_addr_t dst = pcpp::IPv4Address(config_json[name].asCString()).toInt();
-        config->ip_map[src] = dst;
+        config->ipv4_map[src] = dst;
     }
     return config;
 }
@@ -66,37 +70,67 @@ int main(int argc, char** argv) {
         printf("Fail to open output pcap file.\n");
         exit(0);
     }
+    std::fstream fs(std::string(output) + ".map.json", std::ios::out | std::ios::trunc);
+    if(!fs.is_open()){
+        printf("Fail to open output map file.\n");
+        exit(0);
+    }
+    std::random_device rd;
+    std::mt19937 g(rd());
     pcpp::RawPacket rpkt;
     u_int64_t count=0;
     u_int64_t write_count = 0;
     clock_t t = clock();
+    auto generate_valid_ipv4_address = [&](){
+        u_int32_t result = g();
+        while(!((result & 0xFF) && (result & 0xFF00) && (result & 0xFF0000) && (result & 0xFF000000)))
+            result = g();
+        return result;
+    };
+    auto generate_random_ip_and_map = [&](u_int32_t original_ip){
+        u_int32_t random_ip = generate_valid_ipv4_address();
+        config->ipv4_map[original_ip] = random_ip;
+        map_json[pcpp::IPv4Address(original_ip).toString()] = pcpp::IPv4Address(random_ip).toString();
+        return random_ip;
+    };
+    auto set_ip_if_not_mapped = [&](u_int32_t& ip){
+        if(config->ipv4_map.count(ip) == 1)
+            ip = config->ipv4_map[ip];
+        else
+            ip = generate_random_ip_and_map(ip);
+    };
     while(reader->getNextPacket(rpkt)){
         count++;
         pcpp::Packet pkt(&rpkt);
         auto ipv4 = pkt.getLayerOfType<pcpp::IPv4Layer>();
         if(ipv4 != nullptr) {
-            u_int32_t src = ipv4->getSrcIpAddress().toInt();
-            u_int32_t dst = ipv4->getDstIpAddress().toInt();
-            if(config->ip_map.count(src) == 1)
-                ipv4->setSrcIpAddress(pcpp::IPv4Address(config->ip_map[src]));
-            if(config->ip_map.count(dst) == 1)
-                ipv4->setDstIpAddress(pcpp::IPv4Address(config->ip_map[dst]));
+            set_ip_if_not_mapped(ipv4->getIPv4Header()->ipSrc);
+            set_ip_if_not_mapped(ipv4->getIPv4Header()->ipDst);
             auto dns = pkt.getLayerOfType<pcpp::DnsLayer>();
-            for(auto it = dns->getFirstAnswer(); it != nullptr; it = dns->getNextAnswer(it)){
-                auto dns_type = it->getDnsType();
+            auto process_resource = [&](pcpp::DnsResource& res){
+                auto dns_type = res.getDnsType();
                 if(dns_type == pcpp::DnsType::DNS_TYPE_A){
-                    u_int32_t answer_ip = pcpp::IPv4Address(it->getDataAsString()).toInt();
-                    if(config->ip_map.count(answer_ip) == 1)
-                        it->setData(pcpp::IPv4Address(config->ip_map[answer_ip]).toString());
+                    u_int32_t answer_ip = pcpp::IPv4Address(res.getDataAsString()).toInt();
+                    if(config->ipv4_map.count(answer_ip) == 1)
+                        res.setData(pcpp::IPv4Address(config->ipv4_map[answer_ip]).toString());
+                    else
+                        res.setData(pcpp::IPv4Address(generate_random_ip_and_map(answer_ip)).toString());
                 }else if(dns_type == pcpp::DnsType::DNS_TYPE_AAAA){
                     printf("Warning: ipv6 answer detected in %lld packet.\n", count);
                 }
+            };
+            if(dns != nullptr) {
+                for (auto it = dns->getFirstAnswer(); it != nullptr; it = dns->getNextAnswer(it))
+                    process_resource(*it);
+                for (auto it = dns->getFirstAdditionalRecord(); it != nullptr; it = dns->getNextAdditionalRecord(it))
+                    process_resource(*it);
             }
         }else
             printf("Warning: %lld packet doesn't have an ipv4 layer.\n", count);
         write_count++;
         writer.writePacket(rpkt);
     }
+    fs << map_json;
     writer.close();
     reader->close();
     printf("Done! Write %lld packets of %lld packets in %f seconds",
