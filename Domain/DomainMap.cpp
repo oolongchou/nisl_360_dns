@@ -234,7 +234,8 @@ int main(int argc, char** argv){
                         case pcpp::DnsType::DNS_TYPE_NSEC3:
                         case pcpp::DnsType::DNS_TYPE_NSEC3PARAM:
                         case pcpp::DnsType::DNS_TYPE_RRSIG: {
-                            // not implemented.
+                            // Since no one know the private key, so it's
+                            // okay to leave it as it is.
                             auto dnssec = answer->getDataAsString();
                             printf("%lld packet finds DNSSEC:%s\n", count, dnssec.c_str());
                             break;
