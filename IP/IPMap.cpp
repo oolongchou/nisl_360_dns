@@ -1,13 +1,16 @@
 #include<cstdio>
 #include<fstream>
 #include<string>
+#include<cstring>
 #include<ctime>
 #include<map>
 #include<memory>
 #include<random>
 #include<RawPacket.h>
 #include<Packet.h>
+#include<netinet/in.h>
 #include<IPv4Layer.h>
+#include<IPv6Layer.h>
 #include<DnsLayer.h>
 #include<json/json.h>
 #include<PcapFileDevice.h>
@@ -17,8 +20,19 @@ const char* Usage = \
 "Map all ips according to the specific settings.\n"
 "Implemented: src and dst in ip layer, ip of A record answer in dns layer\n";
 
+// Make in6_addr comparable.
+class in6_addr_compare{
+public:
+    bool operator()(const in6_addr& lhs, const in6_addr& rhs) const{
+        return ((const u_int8_t*)(&lhs))[0] < ((const u_int8_t*)(&rhs))[0];
+    }
+};
+
 typedef struct _config{
     std::map<u_int32_t, u_int32_t> ipv4_map;
+    std::map<in6_addr, in6_addr, in6_addr_compare> ipv6_map;
+    in6_addr prefix;
+    u_int32_t prefix_len;
 } Config;
 
 typedef std::shared_ptr<Config> PConfig;
@@ -38,12 +52,28 @@ PConfig read_config(const char* path){
         printf("%s\n", e.what());
         return nullptr;
     }
-    for(auto& name : config_json.getMemberNames()){
-        map_json[name] = config_json[name].asString();
-        in_addr_t src = pcpp::IPv4Address(name).toInt();
-        in_addr_t dst = pcpp::IPv4Address(config_json[name].asCString()).toInt();
-        config->ipv4_map[src] = dst;
+    if(config_json.isMember("ipv4")) {
+        for (auto &name : config_json["ipv4"].getMemberNames()) {
+            map_json["ipv4"][name] = config_json[name].asString();
+            in_addr_t src = pcpp::IPv4Address(name).toInt();
+            in_addr_t dst = pcpp::IPv4Address(config_json["ipv4"][name].asCString()).toInt();
+            config->ipv4_map[src] = dst;
+        }
     }
+    if(config_json.isMember("ipv6")){
+        for(auto& name : config_json["ipv6"].getMemberNames()){
+            map_json["ipv6"][name] = config_json[name].asString();
+            auto src = pcpp::IPv6Address(name).toIn6Addr();
+            auto dst = pcpp::IPv6Address(config_json["ipv6"][name].asString()).toIn6Addr();
+            config->ipv6_map[*src] = *dst;
+        }
+    }
+    if(!config_json.isMember("Prefix") || !config_json.isMember("PrefixLen"))
+        return nullptr;
+    config->prefix = *pcpp::IPv6Address(config_json["Prefix"].asString()).toIn6Addr();
+    config->prefix_len = config_json["PrefixLen"].asUInt();
+    if(config->prefix_len > 128)
+        return nullptr;
     return config;
 }
 
@@ -87,46 +117,88 @@ int main(int argc, char** argv) {
             result = g();
         return result;
     };
-    auto generate_random_ip_and_map = [&](u_int32_t original_ip){
+    auto generate_valid_ipv6_address = [&](){
+        in6_addr result{0};
+        auto result_p32 = (u_int32_t*)&result;
+        for(int i = 0; i<4;i++){
+            auto random_int = g();
+            while(random_int == 0)
+                random_int = g();
+            result_p32[i] = random_int;
+        }
+        auto result_p8 = (u_int8_t*)result_p32;
+        auto prefix_len = config->prefix_len;
+        auto prefix_p8 = ((u_int8_t*)(&config->prefix));
+        auto left = prefix_len & 0x7; // prefix_len % 8
+        auto prefix_bytes = prefix_len/8;
+        for(int i = 0; i < prefix_bytes ;i ++)
+            result_p8[i] = prefix_p8[i];
+        result_p8[prefix_bytes] &= (1 << (8-left)) -1;
+        result_p8[prefix_bytes] |= prefix_p8[prefix_bytes] & (~((1 << (8-left)) -1));
+        return result;
+    };
+    auto generate_random_ipv4_and_map = [&](u_int32_t original_ip){
         u_int32_t random_ip = generate_valid_ipv4_address();
         config->ipv4_map[original_ip] = random_ip;
-        map_json[pcpp::IPv4Address(original_ip).toString()] = pcpp::IPv4Address(random_ip).toString();
+        map_json["ipv4"][pcpp::IPv4Address(original_ip).toString()] = pcpp::IPv4Address(random_ip).toString();
         return random_ip;
     };
-    auto set_ip_if_not_mapped = [&](u_int32_t& ip){
+    auto generate_random_ipv6_and_map = [&](const in6_addr& original_ipv6){
+        auto random_ipv6 = generate_valid_ipv6_address();
+        config->ipv6_map[original_ipv6] = random_ipv6;
+        map_json["ipv6"][pcpp::IPv6Address((u_int8_t*)(&original_ipv6)).toString()] = pcpp::IPv6Address((u_int8_t*)(&random_ipv6)).toString();
+        return random_ipv6;
+    };
+    auto set_ipv4_if_not_mapped = [&](u_int32_t& ip){
         if(config->ipv4_map.count(ip) == 1)
             ip = config->ipv4_map[ip];
         else
-            ip = generate_random_ip_and_map(ip);
+            ip = generate_random_ipv4_and_map(ip);
+    };
+    auto set_ipv6_if_not_mapped = [&](in6_addr& ip){
+        if(config->ipv6_map.count(ip) == 1)
+            ip = config->ipv6_map[ip];
+        else
+            ip = generate_random_ipv6_and_map(ip);
     };
     while(reader->getNextPacket(rpkt)){
         count++;
         pcpp::Packet pkt(&rpkt);
         auto ipv4 = pkt.getLayerOfType<pcpp::IPv4Layer>();
-        if(ipv4 != nullptr) {
-            set_ip_if_not_mapped(ipv4->getIPv4Header()->ipSrc);
-            set_ip_if_not_mapped(ipv4->getIPv4Header()->ipDst);
-            auto dns = pkt.getLayerOfType<pcpp::DnsLayer>();
-            auto process_resource = [&](pcpp::DnsResource& res){
-                auto dns_type = res.getDnsType();
-                if(dns_type == pcpp::DnsType::DNS_TYPE_A){
-                    u_int32_t answer_ip = pcpp::IPv4Address(res.getDataAsString()).toInt();
-                    if(config->ipv4_map.count(answer_ip) == 1)
-                        res.setData(pcpp::IPv4Address(config->ipv4_map[answer_ip]).toString());
-                    else
-                        res.setData(pcpp::IPv4Address(generate_random_ip_and_map(answer_ip)).toString());
-                }else if(dns_type == pcpp::DnsType::DNS_TYPE_AAAA){
-                    printf("Warning: ipv6 answer detected in %lld packet.\n", count);
+        auto ipv6 = pkt.getLayerOfType<pcpp::IPv6Layer>();
+        auto dns = pkt.getLayerOfType<pcpp::DnsLayer>();
+        auto process_resource = [&](pcpp::DnsResource& res){
+            auto dns_type = res.getDnsType();
+            if(dns_type == pcpp::DnsType::DNS_TYPE_A){
+                u_int32_t answer_ip = pcpp::IPv4Address(res.getDataAsString()).toInt();
+                if(config->ipv4_map.count(answer_ip) == 1)
+                    res.setData(pcpp::IPv4Address(config->ipv4_map[answer_ip]).toString());
+                else
+                    res.setData(pcpp::IPv4Address(generate_random_ipv4_and_map(answer_ip)).toString());
+            }else if(dns_type == pcpp::DnsType::DNS_TYPE_AAAA){
+                auto answer_ip = *pcpp::IPv6Address(res.getDataAsString()).toIn6Addr();
+                if(config->ipv6_map.count(answer_ip) == 1)
+                    res.setData(pcpp::IPv6Address((u_int8_t*)(&config->ipv6_map[answer_ip])).toString());
+                else {
+                    auto mapped_ipv6 = generate_random_ipv6_and_map(answer_ip);
+                    res.setData(pcpp::IPv6Address((u_int8_t *)&mapped_ipv6).toString());
                 }
-            };
-            if(dns != nullptr) {
-                for (auto it = dns->getFirstAnswer(); it != nullptr; it = dns->getNextAnswer(it))
-                    process_resource(*it);
-                for (auto it = dns->getFirstAdditionalRecord(); it != nullptr; it = dns->getNextAdditionalRecord(it))
-                    process_resource(*it);
             }
+        };
+        if(ipv4 != nullptr) {
+            set_ipv4_if_not_mapped(ipv4->getIPv4Header()->ipSrc);
+            set_ipv4_if_not_mapped(ipv4->getIPv4Header()->ipDst);
+        }else if(ipv6 != nullptr){
+            set_ipv6_if_not_mapped(*((in6_addr*)ipv6->getIPv6Header()->ipSrc));
+            set_ipv6_if_not_mapped(*((in6_addr*)ipv6->getIPv6Header()->ipDst));
         }else
-            printf("Warning: %lld packet doesn't have an ipv4 layer.\n", count);
+            printf("Warning: %lld packet doesn't contain a valid ip layer.\n", count);
+        if(dns != nullptr) {
+            for (auto it = dns->getFirstAnswer(); it != nullptr; it = dns->getNextAnswer(it))
+                process_resource(*it);
+            for (auto it = dns->getFirstAdditionalRecord(); it != nullptr; it = dns->getNextAdditionalRecord(it))
+                process_resource(*it);
+        }
         write_count++;
         writer.writePacket(rpkt);
     }
