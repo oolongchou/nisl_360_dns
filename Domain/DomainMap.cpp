@@ -265,8 +265,7 @@ int main(int argc, char** argv){
                     return true;
                 };
                 auto process_resource = [&](const std::vector<pcpp::DnsResource*>& v) {
-                    for(auto it = v.begin(); it != v.end(); it++) {
-                        auto answer = *it;
+                    for(auto& answer : v) {
                         auto type = answer->getDnsType();
                         std::string hashed;
                         switch (type) {
