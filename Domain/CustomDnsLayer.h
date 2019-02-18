@@ -29,8 +29,9 @@ namespace pcpp
 
     class DnsLayerExposer {
     public:
-        static size_t getOffsetInLayer(const pcpp::IDnsResource& res);
-        static size_t getNameFieldLength(const pcpp::IDnsResource& res);
+        static size_t getOffsetInLayer(const pcpp::IDnsResource&);
+        static size_t getNameFieldLength(const pcpp::IDnsResource&);
+        static size_t decodeName(pcpp::IDnsResource&, const char*, char*, int = 1);
     };
 
     /**

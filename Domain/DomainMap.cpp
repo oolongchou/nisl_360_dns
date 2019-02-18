@@ -10,6 +10,7 @@
 #include<set>
 #include<RawPacket.h>
 #include<Packet.h>
+#include<sstream>
 #include "CustomDnsLayer.h"
 #include<json/json.h>
 #include<PcapFileDevice.h>
@@ -69,7 +70,7 @@ bool plain_match(const std::string& needle, const std::vector<std::string>& hays
 }
 
 std::string replace_domain(const std::string &domain, const std::map<std::string, std::string> &replacements, bool to_hash){
-    std::string result;
+    std::string result = domain;
     std::string new_suffix;
     bool to_replace = false;
     for(auto& it : replacements) {
@@ -78,8 +79,8 @@ std::string replace_domain(const std::string &domain, const std::map<std::string
             result = domain.substr(0, domain.length() - suffix.length());
             new_suffix = it.second;
             to_replace = true;
-        } else
-            result = domain;
+            break;
+        }
     }
     if(to_hash) {
         size_t last_pos = 0;
@@ -102,11 +103,25 @@ std::string replace_domain(const std::string &domain, const std::map<std::string
         return result;
 }
 
-void dns_resource_set_domain(
-        u_int8_t* dns_data,
+std::string decodeWithoutPtr(const u_int8_t* ptr){
+    std::stringstream ss;
+    auto p = ptr;
+    auto len = *p;
+    while(len && (len & 0xc0 != 0xc0)){
+        p++;
+        for(u_int8_t i = 0; i < len; i++)
+            ss << p[i];
+        p += len;
+        len = *p;
+    }
+    return ss.str();
+}
+
+void write_domain(
+        u_int8_t *dns_data,
         size_t dns_data_length,
-        u_int8_t* start_address,
-        const std::string& domain,
+        u_int8_t *start_address,
+        const std::string &domain,
         int iter = 0){
     assert(iter <= 20);
     size_t pos = 0;
@@ -124,8 +139,9 @@ void dns_resource_set_domain(
         }
         auto len = pstart[0];
         if((len & 0xc0) == 0xc0){
-            auto offset = ((len & 0x3f) << 8) + (0xFF & pstart[1]);
-            dns_resource_set_domain(dns_data, dns_data_length, dns_data + offset, domain.substr(last), iter + 1);\
+            // auto offset = ((len & 0x3f) << 8) + (0xFF & pstart[1]);
+            // **we didn't dereference any pointer.**
+            // write_domain(dns_data, dns_data_length, dns_data + offset, domain.substr(last), iter + 1);
             break; // one domain can only contain one pointer.
         }else{
             std::string segment = domain.substr(last, pos - last);
@@ -135,18 +151,6 @@ void dns_resource_set_domain(
             pstart += (len + 1);
         }
     }
-}
-
-void set_resource_data(pcpp::DnsLayer& dns, pcpp::DnsResource& res, const std::string& domain){
-    assert(res.getDataAsString().length() == domain.length());
-    auto start_address = dns.getData() + pcpp::DnsLayerExposer::getOffsetInLayer(res) + pcpp::DnsLayerExposer::getNameFieldLength(res) +3*sizeof(uint16_t) + sizeof(uint32_t);
-    dns_resource_set_domain(dns.getData(), dns.getDataLen(), start_address, domain);
-}
-
-void set_resource_name(pcpp::DnsLayer& dns, pcpp::DnsResource& res, const std::string& domain){
-    assert(res.getName().length() == domain.length());
-    auto start_address = dns.getData() + pcpp::DnsLayerExposer::getOffsetInLayer(res);
-    dns_resource_set_domain(dns.getData(), dns.getDataLen(), start_address, domain);
 }
 
 PConfig read_config(const char* path){
@@ -264,40 +268,44 @@ int main(int argc, char** argv){
                     hashed = get_hashed_domain(domain, config);
                     return true;
                 };
+                auto set_domain = [&](pcpp::DnsResource* answer, size_t offset){
+                    std::string hashed;
+                    auto domain = decodeWithoutPtr(dns->getData() + offset);
+                    if(config->to_lowercase)
+                        std::transform(domain.begin(), domain.end(), domain.begin(), ::tolower);
+                    if (delete_if_match(domain, config))
+                        return -1L;
+                    if(plain_match(domain, config->constants))
+                        hashed = domain;
+                    else
+                        hashed = get_hashed_domain(domain, config);
+                    write_domain(dns->getData(), dns->getDataLen(), dns->getData()+offset, hashed);
+                    map[domain] = hashed;
+                    return (long)domain.length();
+                };
                 auto process_resource = [&](const std::vector<pcpp::DnsResource*>& v) {
                     for(auto& answer : v) {
                         auto type = answer->getDnsType();
-                        std::string hashed;
+                        auto name_offset = pcpp::DnsLayerExposer::getOffsetInLayer(*answer);
+                        auto data_offset = pcpp::DnsLayerExposer::getOffsetInLayer(*answer)
+                                           + pcpp::DnsLayerExposer::getNameFieldLength(*answer)
+                                           +3*sizeof(uint16_t) + sizeof(uint32_t);
                         switch (type) {
                             case pcpp::DnsType::DNS_TYPE_NS:
-                            case pcpp::DnsType::DNS_TYPE_CNAME: {
-                                auto cname = answer->getDataAsString();
-                                if (process_domain(cname, config, hashed)) {
-                                    map[cname] = hashed;
-                                    //answer->setData(hashed);
-                                    set_resource_data(*dns, *answer, hashed);
-                                    // fall through!
-                                } else
-                                    return false;
-                            }
+                            case pcpp::DnsType::DNS_TYPE_CNAME:
+                                set_domain(answer, data_offset);
                             case pcpp::DnsType::DNS_TYPE_NSEC:
                             case pcpp::DnsType::DNS_TYPE_NSEC3:
                             case pcpp::DnsType::DNS_TYPE_NSEC3PARAM:
                             case pcpp::DnsType::DNS_TYPE_RRSIG:
                             case pcpp::DnsType::DNS_TYPE_A:
-                            case pcpp::DnsType::DNS_TYPE_AAAA: {
-                                auto name = answer->getName();
-                                if (process_domain(name, config, hashed)) {
-                                    map[name] = hashed;
-                                    //answer->setName(hashed);
-                                    set_resource_name(*dns, *answer, hashed);
-                                    break;
-                                } else
-                                    return false;
-                            }
+                            case pcpp::DnsType::DNS_TYPE_AAAA:
+                                set_domain(answer, name_offset);
+                                break;
                             case pcpp::DnsType::DNS_TYPE_SOA: {
-                                auto soa = answer->getDataAsString();
-                                printf("%lld packet find SOA:%s\n", count, soa.c_str());
+                                set_domain(answer, name_offset);
+                                auto len = (size_t) set_domain(answer, data_offset);
+                                set_domain(answer, data_offset + len);
                                 break;
                             }
                             case pcpp::DnsType::DNS_TYPE_OPT:
