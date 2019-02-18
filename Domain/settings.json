@@ -1,5 +1,6 @@
 {
   "ToLowercase" : true,
+  "ToHash": false,
   "Deletions": [
     "arpa"
   ],

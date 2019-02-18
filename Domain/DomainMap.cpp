@@ -23,6 +23,7 @@ static const size_t digest_len = MD5_DIGEST_LENGTH;
 
 typedef struct _config{
     bool to_lowercase;
+    bool to_hash;
     std::vector<std::string> deletions;
     std::vector<std::string> constants;
     std::map<std::string, std::string> replacements;
@@ -125,6 +126,9 @@ PConfig read_config(const char* path){
         for(auto& it: constants)
             config->constants.emplace_back(it.asString());
     }
+    if(!config_json.isMember("ToHash"))
+        return nullptr;
+    config->to_hash = config_json["ToHash"].asBool();
     return config;
 }
 
@@ -202,7 +206,7 @@ int main(int argc, char** argv){
                         std::transform(domain.begin(), domain.end(), domain.begin(), ::tolower);
                     if (delete_if_match(domain, config))
                         return false;
-                    if(plain_match(domain, config->constants)) {
+                    if(!config->to_hash && plain_match(domain, config->constants)) {
                         hashed = domain;
                         return true;
                     }
