@@ -10,7 +10,7 @@
 #include<set>
 #include<RawPacket.h>
 #include<Packet.h>
-#include<DnsLayer.h>
+#include "CustomDnsLayer.h"
 #include<json/json.h>
 #include<PcapFileDevice.h>
 #ifdef _HASH_SHA1
@@ -68,7 +68,7 @@ bool plain_match(const std::string& needle, const std::vector<std::string>& hays
     return false;
 }
 
-std::string replace_domain(const std::string &domain, const std::map<std::string, std::string> &replacements){
+std::string replace_domain(const std::string &domain, const std::map<std::string, std::string> &replacements, bool to_hash){
     std::string result;
     std::string new_suffix;
     bool to_replace = false;
@@ -81,21 +81,72 @@ std::string replace_domain(const std::string &domain, const std::map<std::string
         } else
             result = domain;
     }
-    size_t last_pos = 0;
-    for(size_t i = 0; i<=result.length();i++){
-        if((i == result.length()&&last_pos != i) || (i<result.length() && result[i] == '.')){
-            size_t subdomain_len = i - last_pos;
-            std::string digest_hex =
-                    format_digest(hash(domain.substr(last_pos, subdomain_len).c_str(), subdomain_len), subdomain_len/2 + 1);
-            for(size_t j = 0; j<subdomain_len;j++)
-                result[last_pos + j] = digest_hex[j];
-            last_pos = i + 1;
+    if(to_hash) {
+        size_t last_pos = 0;
+        for (size_t i = 0; i <= result.length(); i++) { // compatible for both .com.cn and com.cn
+            if ((i == result.length() && last_pos != i) // a.b
+                || (i < result.length() && result[i] == '.')) { // a.b.
+                size_t subdomain_len = i - last_pos;
+                std::string digest_hex =
+                        format_digest(hash(domain.substr(last_pos, subdomain_len).c_str(), subdomain_len),
+                                      subdomain_len / 2 + 1);
+                for (size_t j = 0; j < subdomain_len; j++)
+                    result[last_pos + j] = digest_hex[j];
+                last_pos = i + 1;
+            }
         }
     }
     if(to_replace)
         return result + new_suffix;
     else
         return result;
+}
+
+void dns_resource_set_domain(
+        u_int8_t* dns_data,
+        size_t dns_data_length,
+        u_int8_t* start_address,
+        const std::string& domain,
+        int iter = 0){
+    assert(iter <= 20);
+    size_t pos = 0;
+    size_t last = 0;
+    u_int8_t* pstart = start_address;
+    while(true){
+        if(pos == domain.length()) // .com.cn
+            break;
+        pos = domain.find('.', last);
+        if(pos == std::string::npos){
+            if(last == domain.length()) // .com.cn.
+                break;
+            else
+                pos = domain.length(); // .com.cn (on more iteration)
+        }
+        auto len = pstart[0];
+        if((len & 0xc0) == 0xc0){
+            auto offset = ((len & 0x3f) << 8) + (0xFF & pstart[1]);
+            dns_resource_set_domain(dns_data, dns_data_length, dns_data + offset, domain.substr(last), iter + 1);\
+            break; // one domain can only contain one pointer.
+        }else{
+            std::string segment = domain.substr(last, pos - last);
+            assert(len == segment.length());
+            memcpy(pstart+1, segment.c_str(), len);
+            last = pos + 1;
+            pstart += (len + 1);
+        }
+    }
+}
+
+void set_resource_data(pcpp::DnsLayer& dns, pcpp::DnsResource& res, const std::string& domain){
+    assert(res.getDataAsString().length() == domain.length());
+    auto start_address = dns.getData() + pcpp::DnsLayerExposer::getOffsetInLayer(res) + pcpp::DnsLayerExposer::getNameFieldLength(res) +3*sizeof(uint16_t) + sizeof(uint32_t);
+    dns_resource_set_domain(dns.getData(), dns.getDataLen(), start_address, domain);
+}
+
+void set_resource_name(pcpp::DnsLayer& dns, pcpp::DnsResource& res, const std::string& domain){
+    assert(res.getName().length() == domain.length());
+    auto start_address = dns.getData() + pcpp::DnsLayerExposer::getOffsetInLayer(res);
+    dns_resource_set_domain(dns.getData(), dns.getDataLen(), start_address, domain);
 }
 
 PConfig read_config(const char* path){
@@ -198,7 +249,7 @@ int main(int argc, char** argv){
                     if (map.isMember(domain))
                         hashed = map[domain].asString();
                     else
-                        hashed = replace_domain(domain, config->replacements);
+                        hashed = replace_domain(domain, config->replacements, config->to_hash);
                     return hashed;
                 };
                 auto process_domain = [&](std::string& domain, const PConfig& config, std::string& hashed){
@@ -206,13 +257,68 @@ int main(int argc, char** argv){
                         std::transform(domain.begin(), domain.end(), domain.begin(), ::tolower);
                     if (delete_if_match(domain, config))
                         return false;
-                    if(!config->to_hash && plain_match(domain, config->constants)) {
+                    if(plain_match(domain, config->constants)) {
                         hashed = domain;
                         return true;
                     }
                     hashed = get_hashed_domain(domain, config);
                     return true;
                 };
+                auto process_resource = [&](const std::vector<pcpp::DnsResource*>& v) {
+                    for(auto it = v.begin(); it != v.end(); it++) {
+                        auto answer = *it;
+                        auto type = answer->getDnsType();
+                        std::string hashed;
+                        switch (type) {
+                            case pcpp::DnsType::DNS_TYPE_NS:
+                            case pcpp::DnsType::DNS_TYPE_CNAME: {
+                                auto cname = answer->getDataAsString();
+                                if (process_domain(cname, config, hashed)) {
+                                    map[cname] = hashed;
+                                    //answer->setData(hashed);
+                                    set_resource_data(*dns, *answer, hashed);
+                                    // fall through!
+                                } else
+                                    return false;
+                            }
+                            case pcpp::DnsType::DNS_TYPE_NSEC:
+                            case pcpp::DnsType::DNS_TYPE_NSEC3:
+                            case pcpp::DnsType::DNS_TYPE_NSEC3PARAM:
+                            case pcpp::DnsType::DNS_TYPE_RRSIG:
+                            case pcpp::DnsType::DNS_TYPE_A:
+                            case pcpp::DnsType::DNS_TYPE_AAAA: {
+                                auto name = answer->getName();
+                                if (process_domain(name, config, hashed)) {
+                                    map[name] = hashed;
+                                    //answer->setName(hashed);
+                                    set_resource_name(*dns, *answer, hashed);
+                                    break;
+                                } else
+                                    return false;
+                            }
+                            case pcpp::DnsType::DNS_TYPE_SOA: {
+                                auto soa = answer->getDataAsString();
+                                printf("%lld packet find SOA:%s\n", count, soa.c_str());
+                                break;
+                            }
+                            case pcpp::DnsType::DNS_TYPE_OPT:
+                                // we notice it but don't handle it.
+                                break;
+                            default:
+                                printf("the answer of %lld packet with type id %d isn't processed.\n", count, type);
+                        }
+                    }
+                    return true;
+                };
+                // the sequence here is important because of the domain pointers.
+                std::vector<pcpp::DnsResource*> temp_array;
+                for(auto answer = dns->getFirstAnswer(); answer != nullptr; answer = dns->getNextAnswer(answer))
+                    temp_array.emplace_back(answer);
+                for(auto answer = dns->getFirstAuthority(); answer!= nullptr; answer = dns->getNextAuthority(answer))
+                    temp_array.emplace_back(answer);
+                for(auto answer = dns->getFirstAdditionalRecord(); answer != nullptr; answer = dns->getNextAdditionalRecord(answer))
+                    temp_array.emplace_back(answer);
+                process_resource(temp_array);
                 for (auto query = dns->getFirstQuery(); query != nullptr; query = dns->getNextQuery(query)) {
                     auto domain = query->getName();
                     std::string hashed;
@@ -221,42 +327,6 @@ int main(int argc, char** argv){
                         query->setName(hashed);
                     }
                 }
-                for(auto answer = dns->getFirstAnswer(); answer != nullptr; answer = dns->getNextAnswer(answer)) {
-                    auto domain = answer->getName();
-                    auto type = answer->getDnsType();
-                    switch (type) {
-                        case pcpp::DnsType::DNS_TYPE_CNAME: {
-                            auto cname = answer->getDataAsString();
-                            std::string hashed;
-                            if (process_domain(cname, config, hashed)) {
-                                map[domain] = hashed;
-                                answer->setData(hashed);
-                            }
-                        }
-                            break;
-                        case pcpp::DnsType::DNS_TYPE_NSEC:
-                        case pcpp::DnsType::DNS_TYPE_NSEC3:
-                        case pcpp::DnsType::DNS_TYPE_NSEC3PARAM:
-                        case pcpp::DnsType::DNS_TYPE_RRSIG: {
-                            // Since no one know the private key, so it's
-                            // okay to leave it as it is.
-                            auto dnssec = answer->getDataAsString();
-                            printf("%lld packet finds DNSSEC:%s\n", count, dnssec.c_str());
-                            break;
-                        }
-                        case pcpp::DnsType::DNS_TYPE_A:
-                        case pcpp::DnsType::DNS_TYPE_AAAA:
-                            // ignore normal ipv4 and ipv6 response.
-                            break;
-                        case pcpp::DNS_TYPE_NS:
-                            // not implemented.
-                            break;
-                        default:
-                            printf("the answer of %lld packet with type id %d isn't processed.\n", count, type);
-                    }
-                }
-                // now we should go to authoritative servers and additional records.
-                // to be implemented.
             }
         }
         if(to_write) {
