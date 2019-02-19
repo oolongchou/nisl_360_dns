@@ -32,7 +32,10 @@ typedef struct _config{
 
 typedef std::shared_ptr<unsigned char> Digest;
 
+typedef Digest Buffer;
+
 typedef std::shared_ptr<Config> PConfig;
+
 
 bool lhsEndsWithrhs(const std::string& lhs, const std::string& rhs){
     if(lhs.length() < rhs.length())
@@ -103,20 +106,6 @@ std::string replace_domain(const std::string &domain, const std::map<std::string
         return result;
 }
 
-std::string decodeWithoutPtr(const u_int8_t* ptr){
-    std::stringstream ss;
-    auto p = ptr;
-    auto len = *p;
-    while(len && (len & 0xc0 != 0xc0)){
-        p++;
-        for(u_int8_t i = 0; i < len; i++)
-            ss << p[i];
-        p += len;
-        len = *p;
-    }
-    return ss.str();
-}
-
 void write_domain(
         u_int8_t *dns_data,
         size_t dns_data_length,
@@ -139,9 +128,9 @@ void write_domain(
         }
         auto len = pstart[0];
         if((len & 0xc0) == 0xc0){
-            // auto offset = ((len & 0x3f) << 8) + (0xFF & pstart[1]);
-            // **we didn't dereference any pointer.**
-            // write_domain(dns_data, dns_data_length, dns_data + offset, domain.substr(last), iter + 1);
+            auto offset = ((len & 0x3f) << 8) + (0xFF & pstart[1]);
+            //**we didn't dereference any pointer.**
+            write_domain(dns_data, dns_data_length, dns_data + offset, domain.substr(last), iter + 1);
             break; // one domain can only contain one pointer.
         }else{
             std::string segment = domain.substr(last, pos - last);
@@ -240,6 +229,8 @@ int main(int argc, char** argv){
                 to_write = false;
             }else {
                 // not elegant at all. :(
+                auto buffer = Buffer(new unsigned char[dns->getDataLen()], [](const unsigned char* p){delete []p;});
+                memcpy(buffer.get(), dns->getData(), dns->getDataLen());
                 auto delete_if_match = [&](const std::string& domain, const PConfig& config){
                     if (plain_match(domain, config->deletions)) {
                         to_write = false;
@@ -256,21 +247,11 @@ int main(int argc, char** argv){
                         hashed = replace_domain(domain, config->replacements, config->to_hash);
                     return hashed;
                 };
-                auto process_domain = [&](std::string& domain, const PConfig& config, std::string& hashed){
-                    if(config->to_lowercase)
-                        std::transform(domain.begin(), domain.end(), domain.begin(), ::tolower);
-                    if (delete_if_match(domain, config))
-                        return false;
-                    if(plain_match(domain, config->constants)) {
-                        hashed = domain;
-                        return true;
-                    }
-                    hashed = get_hashed_domain(domain, config);
-                    return true;
-                };
-                auto set_domain = [&](pcpp::DnsResource* answer, size_t offset){
+                auto set_domain = [&](pcpp::IDnsResource* answer, size_t offset){
                     std::string hashed;
-                    auto domain = decodeWithoutPtr(dns->getData() + offset);
+                    char tmp[256];
+                    auto len = pcpp::DnsLayerExposer::decodeName(*answer,buffer.get(), (const char*)(buffer.get() + offset), tmp);
+                    std::string domain((const char*)tmp);
                     if(config->to_lowercase)
                         std::transform(domain.begin(), domain.end(), domain.begin(), ::tolower);
                     if (delete_if_match(domain, config))
@@ -281,9 +262,12 @@ int main(int argc, char** argv){
                         hashed = get_hashed_domain(domain, config);
                     write_domain(dns->getData(), dns->getDataLen(), dns->getData()+offset, hashed);
                     map[domain] = hashed;
-                    return (long)domain.length();
+                    return (long)len;
                 };
-                auto process_resource = [&](const std::vector<pcpp::DnsResource*>& v) {
+                auto process_resource = [&](const std::vector<pcpp::IDnsResource*>& v) {
+                    auto has_data = [](pcpp::IDnsResource* p){
+                        return dynamic_cast<pcpp::DnsResource*>(p) != nullptr;
+                    };
                     for(auto& answer : v) {
                         auto type = answer->getDnsType();
                         auto name_offset = pcpp::DnsLayerExposer::getOffsetInLayer(*answer);
@@ -291,49 +275,42 @@ int main(int argc, char** argv){
                                            + pcpp::DnsLayerExposer::getNameFieldLength(*answer)
                                            +3*sizeof(uint16_t) + sizeof(uint32_t);
                         switch (type) {
-                            case pcpp::DnsType::DNS_TYPE_NS:
-                            case pcpp::DnsType::DNS_TYPE_CNAME:
-                                set_domain(answer, data_offset);
-                            case pcpp::DnsType::DNS_TYPE_NSEC:
-                            case pcpp::DnsType::DNS_TYPE_NSEC3:
-                            case pcpp::DnsType::DNS_TYPE_NSEC3PARAM:
-                            case pcpp::DnsType::DNS_TYPE_RRSIG:
-                            case pcpp::DnsType::DNS_TYPE_A:
-                            case pcpp::DnsType::DNS_TYPE_AAAA:
-                                set_domain(answer, name_offset);
-                                break;
                             case pcpp::DnsType::DNS_TYPE_SOA: {
                                 set_domain(answer, name_offset);
-                                auto len = (size_t) set_domain(answer, data_offset);
-                                set_domain(answer, data_offset + len);
+                                if(has_data(answer)) {
+                                    auto len = (size_t) set_domain(answer, data_offset);
+                                    set_domain(answer, data_offset + len);
+                                }else
+                                    delete_if_match(answer->getName(), config);
                                 break;
                             }
                             case pcpp::DnsType::DNS_TYPE_OPT:
                                 // we notice it but don't handle it.
                                 break;
+                            case pcpp::DnsType::DNS_TYPE_NS:
+                            case pcpp::DnsType::DNS_TYPE_CNAME:
+                                if(has_data(answer))
+                                    set_domain(answer, data_offset);
+                                else
+                                    delete_if_match(answer->getName(), config);
                             default:
-                                printf("the answer of %lld packet with type id %d isn't processed.\n", count, type);
+                                set_domain(answer, name_offset);
+                                break;
                         }
                     }
                     return true;
                 };
                 // the sequence here is important because of the domain pointers.
-                std::vector<pcpp::DnsResource*> temp_array;
+                std::vector<pcpp::IDnsResource*> temp_array;
                 for(auto answer = dns->getFirstAnswer(); answer != nullptr; answer = dns->getNextAnswer(answer))
                     temp_array.emplace_back(answer);
                 for(auto answer = dns->getFirstAuthority(); answer!= nullptr; answer = dns->getNextAuthority(answer))
                     temp_array.emplace_back(answer);
                 for(auto answer = dns->getFirstAdditionalRecord(); answer != nullptr; answer = dns->getNextAdditionalRecord(answer))
                     temp_array.emplace_back(answer);
+                for (auto query = dns->getFirstQuery(); query != nullptr; query = dns->getNextQuery(query))
+                    temp_array.emplace_back(query);
                 process_resource(temp_array);
-                for (auto query = dns->getFirstQuery(); query != nullptr; query = dns->getNextQuery(query)) {
-                    auto domain = query->getName();
-                    std::string hashed;
-                    if(process_domain(domain, config, hashed)) {
-                        map[domain] = hashed;
-                        query->setName(hashed);
-                    }
-                }
             }
         }
         if(to_write) {

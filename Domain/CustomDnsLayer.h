@@ -31,7 +31,7 @@ namespace pcpp
     public:
         static size_t getOffsetInLayer(const pcpp::IDnsResource&);
         static size_t getNameFieldLength(const pcpp::IDnsResource&);
-        static size_t decodeName(pcpp::IDnsResource&, const char*, char*, int = 1);
+        static size_t decodeName(pcpp::IDnsResource&,u_int8_t*, const char*, char*, int = 1);
     };
 
     /**
@@ -450,6 +450,7 @@ namespace pcpp
         friend class IDnsResource;
         friend class DnsQuery;
         friend class DnsResource;
+        friend class DnsLayerExposer;
 
     public:
 
