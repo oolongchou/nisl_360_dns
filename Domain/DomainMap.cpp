@@ -11,7 +11,8 @@
 #include<RawPacket.h>
 #include<Packet.h>
 #include<sstream>
-#include "CustomDnsLayer.h"
+#include"CustomDnsLayer.h"
+#include<TcpLayer.h>
 #include<json/json.h>
 #include<PcapFileDevice.h>
 #ifdef _HASH_SHA1
@@ -129,7 +130,6 @@ void write_domain(
         auto len = pstart[0];
         if((len & 0xc0) == 0xc0){
             auto offset = ((len & 0x3f) << 8) + (0xFF & pstart[1]);
-            //**we didn't dereference any pointer.**
             write_domain(dns_data, dns_data_length, dns_data + offset, domain.substr(last), iter + 1);
             break; // one domain can only contain one pointer.
         }else{
@@ -222,6 +222,29 @@ int main(int argc, char** argv){
         bool to_write = true;
         pcpp::Packet pkt(&rpkt);
         auto dns = pkt.getLayerOfType<pcpp::DnsLayer>();
+        auto tcp = pkt.getLayerOfType<pcpp::TcpLayer>();
+        std::shared_ptr<pcpp::DnsLayer> pdns;
+        if(dns == nullptr && tcp != nullptr && tcp->getDataLen() - tcp->getHeaderLen() >= sizeof(pcpp::dnshdr)) {
+            auto tcp_layer_len = tcp->getDataLen();
+            auto tcp_header_len = tcp->getHeaderLen();
+            auto dns_packet_length = ntohs(((u_int16_t*)(tcp->getData() + tcp_header_len))[0]);
+            /*
+             * RFC 1035 4.2.2
+             *
+             * The message is prefixed with a two byte length field which gives the message length, excluding the two byte length field.
+             *
+             */
+            if(dns_packet_length != tcp_layer_len - tcp_header_len - 2){
+                dns = nullptr;
+                to_write = false;
+            }else {
+                /*
+                 * We have to do this since the copy constructor of pcpp::DnsLayer will copy all data.
+                 */
+                pdns = std::make_shared<pcpp::DnsLayer>(tcp->getData() + tcp_header_len + 2, dns_packet_length, tcp, &pkt);
+                dns = pdns.get();
+            }
+        }
         if(dns != nullptr){
             u_int16_t tid = dns->getDnsHeader()->transactionID;
             if(to_delete.count(tid) == 1){
@@ -265,6 +288,9 @@ int main(int argc, char** argv){
                     return (long)len;
                 };
                 auto process_resource = [&](const std::vector<pcpp::IDnsResource*>& v) {
+                    auto is_query = [](pcpp::IDnsResource* p){
+                        return dynamic_cast<pcpp::DnsQuery*>(p) != nullptr;
+                    };
                     auto has_data = [](pcpp::IDnsResource* p){
                         return dynamic_cast<pcpp::DnsResource*>(p) != nullptr;
                     };
