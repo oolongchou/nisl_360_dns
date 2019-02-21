@@ -301,6 +301,12 @@ int main(int argc, char** argv){
                                            + pcpp::DnsLayerExposer::getNameFieldLength(*answer)
                                            +3*sizeof(uint16_t) + sizeof(uint32_t);
                         switch (type) {
+                            case pcpp::DnsType::DNS_TYPE_RRSIG:{
+                                auto signer_name_offset = data_offset + 2*sizeof(u_int16_t) + 2*sizeof(u_int8_t) + 3*sizeof(u_int32_t);
+                                set_domain(answer, signer_name_offset);
+                                set_domain(answer, name_offset);
+                                break;
+                            }
                             case pcpp::DnsType::DNS_TYPE_SOA: {
                                 set_domain(answer, name_offset);
                                 if(has_data(answer)) {
