@@ -7,5 +7,6 @@
   "Constants": [],
   "Replacements": {
     "edu.cn" : "com.cn"
-  }
+  },
+  "PreserveLast" : true
 }

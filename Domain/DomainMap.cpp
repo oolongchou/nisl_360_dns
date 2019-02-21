@@ -15,17 +15,14 @@
 #include<TcpLayer.h>
 #include<json/json.h>
 #include<PcapFileDevice.h>
-#ifdef _HASH_SHA1
 #include<openssl/sha.h>
-static const size_t digest_len = SHA_DIGEST_LENGTH;
-#else
-#include<openssl/md5.h>
-static const size_t digest_len = MD5_DIGEST_LENGTH;
-#endif
+
+static const size_t digest_len = SHA256_DIGEST_LENGTH;
 
 typedef struct _config{
     bool to_lowercase;
     bool to_hash;
+    bool preserve_last;
     std::vector<std::string> deletions;
     std::vector<std::string> constants;
     std::map<std::string, std::string> replacements;
@@ -46,11 +43,7 @@ bool lhsEndsWithrhs(const std::string& lhs, const std::string& rhs){
 
 Digest hash(const char* str, u_int64_t len){
     auto buffer = new unsigned char[digest_len];
-#ifdef _HASH_SHA1
-    SHA1((const unsigned char*)str, len, buffer);
-#else
-    MD5((const unsigned char*)str, len, buffer);
-#endif
+    SHA256((const unsigned char*)str, len, buffer);
     Digest digest(buffer, [](const unsigned char* p){delete []p;});
     return digest;
 }
@@ -73,38 +66,52 @@ bool plain_match(const std::string& needle, const std::vector<std::string>& hays
     return false;
 }
 
-std::string replace_domain(const std::string &domain, const std::map<std::string, std::string> &replacements, bool to_hash){
+std::vector<std::string> split(const std::string& str, char delim = '.'){
+    std::vector<std::string> result;
+    size_t last = 0;
+    size_t dot = 0;
+    while((dot = str.find(delim, last))!=std::string::npos) {
+        if(dot != last)
+            result.emplace_back(str.substr(last, dot - last));
+        last = dot + 1;
+    }
+    if(last != str.length())
+        result.emplace_back(str.substr(last));
+    return result;
+}
+
+std::string join(const std::vector<std::string>& v, char delim = '.'){
+    std::stringstream ss;
+    for(auto it = v.begin(); it != v.end(); it ++){
+        if(it != v.end() - 1)
+            ss << *it << delim;
+        else
+            ss << *it;
+    }
+    return ss.str();
+}
+
+std::string replace_domain(const std::string &domain, const std::map<std::string, std::string> &replacements, const PConfig& config){
     std::string result = domain;
-    std::string new_suffix;
-    bool to_replace = false;
+    std::string suffix;
     for(auto& it : replacements) {
-        std::string suffix = it.first;
-        if (lhsEndsWithrhs(domain, suffix)) {
-            result = domain.substr(0, domain.length() - suffix.length());
-            new_suffix = it.second;
-            to_replace = true;
+        std::string replacement = it.first;
+        if (lhsEndsWithrhs(domain, replacement)) {
+            result = domain.substr(0, domain.length() - replacement.length());
+            suffix = it.second;
             break;
         }
     }
-    if(to_hash) {
-        size_t last_pos = 0;
-        for (size_t i = 0; i <= result.length(); i++) { // compatible for both .com.cn and com.cn
-            if ((i == result.length() && last_pos != i) // a.b
-                || (i < result.length() && result[i] == '.')) { // a.b.
-                size_t subdomain_len = i - last_pos;
-                std::string digest_hex =
-                        format_digest(hash(domain.substr(last_pos, subdomain_len).c_str(), subdomain_len),
-                                      subdomain_len / 2 + 1);
-                for (size_t j = 0; j < subdomain_len; j++)
-                    result[last_pos + j] = digest_hex[j];
-                last_pos = i + 1;
-            }
-        }
-    }
-    if(to_replace)
-        return result + new_suffix;
-    else
-        return result;
+    auto result_tokens = split(result);
+    auto suffix_tokens = split(suffix);
+    std::stringstream ss;
+    if(config->to_hash)
+        for(auto it = result_tokens.begin(); it != result_tokens.end(); it ++)
+            if(!(config->preserve_last && result_tokens.size() > 1 && it == result_tokens.begin()))
+                *it = format_digest(hash(it->c_str(), it->length())).substr(0, it->length());
+    for(auto& it : suffix_tokens)
+        result_tokens.emplace_back(it);
+    return join(result_tokens);
 }
 
 void write_domain(
@@ -170,8 +177,9 @@ PConfig read_config(const char* path){
         for(auto& it: constants)
             config->constants.emplace_back(it.asString());
     }
-    if(!config_json.isMember("ToHash"))
+    if(!config_json.isMember("ToHash") || !config_json.isMember("PreserveLast"))
         return nullptr;
+    config->preserve_last = config_json["PreserveLast"].asBool();
     config->to_hash = config_json["ToHash"].asBool();
     return config;
 }
@@ -267,7 +275,7 @@ int main(int argc, char** argv){
                     if (map.isMember(domain))
                         hashed = map[domain].asString();
                     else
-                        hashed = replace_domain(domain, config->replacements, config->to_hash);
+                        hashed = replace_domain(domain, config->replacements, config);
                     return hashed;
                 };
                 auto set_domain = [&](pcpp::IDnsResource* answer, size_t offset){
