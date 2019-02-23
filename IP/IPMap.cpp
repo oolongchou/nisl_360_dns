@@ -11,6 +11,7 @@
 #include<netinet/in.h>
 #include<IPv4Layer.h>
 #include<IPv6Layer.h>
+#include<TcpLayer.h>
 #include<DnsLayer.h>
 #include<json/json.h>
 #include<PcapFileDevice.h>
@@ -111,6 +112,7 @@ int main(int argc, char** argv) {
     u_int64_t count=0;
     u_int64_t write_count = 0;
     clock_t t = clock();
+    bool to_write = true;
     auto generate_valid_ipv4_address = [&](){
         u_int32_t result = g();
         while(!((result & 0xFF) && (result & 0xFF00) && (result & 0xFF0000) && (result & 0xFF000000)))
@@ -163,10 +165,12 @@ int main(int argc, char** argv) {
     };
     while(reader->getNextPacket(rpkt)){
         count++;
+        to_write = true;
         pcpp::Packet pkt(&rpkt);
         auto ipv4 = pkt.getLayerOfType<pcpp::IPv4Layer>();
         auto ipv6 = pkt.getLayerOfType<pcpp::IPv6Layer>();
         auto dns = pkt.getLayerOfType<pcpp::DnsLayer>();
+        auto tcp = pkt.getLayerOfType<pcpp::TcpLayer>();
         auto process_resource = [&](pcpp::DnsResource& res){
             auto dns_type = res.getDnsType();
             if(dns_type == pcpp::DnsType::DNS_TYPE_A){
@@ -193,14 +197,38 @@ int main(int argc, char** argv) {
             set_ipv6_if_not_mapped(*((in6_addr*)ipv6->getIPv6Header()->ipDst));
         }else
             printf("Warning: %lld packet doesn't contain a valid ip layer.\n", count);
+        std::shared_ptr<pcpp::DnsLayer> pdns;
+        if(dns == nullptr && tcp != nullptr && tcp->getDataLen() - tcp->getHeaderLen() >= sizeof(pcpp::dnshdr)) {
+            auto tcp_layer_len = tcp->getDataLen();
+            auto tcp_header_len = tcp->getHeaderLen();
+            auto dns_packet_length = ntohs(((u_int16_t*)(tcp->getData() + tcp_header_len))[0]);
+            /*
+             * RFC 1035 4.2.2
+             *
+             * The message is prefixed with a two byte length field which gives the message length, excluding the two byte length field.
+             *
+             */
+            if(dns_packet_length != tcp_layer_len - tcp_header_len - 2){
+                dns = nullptr;
+                to_write = false;
+            }else {
+                /*
+                 * We have to do this since the copy constructor of pcpp::DnsLayer will copy all data.
+                 */
+                pdns = std::make_shared<pcpp::DnsLayer>(tcp->getData() + tcp_header_len + 2, dns_packet_length, tcp, &pkt);
+                dns = pdns.get();
+            }
+        }
         if(dns != nullptr) {
             for (auto it = dns->getFirstAnswer(); it != nullptr; it = dns->getNextAnswer(it))
                 process_resource(*it);
             for (auto it = dns->getFirstAdditionalRecord(); it != nullptr; it = dns->getNextAdditionalRecord(it))
                 process_resource(*it);
         }
-        write_count++;
-        writer.writePacket(rpkt);
+        if(to_write) {
+            write_count++;
+            writer.writePacket(rpkt);
+        }
     }
     fs << map_json;
     writer.close();
