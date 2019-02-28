@@ -23,6 +23,7 @@ typedef struct _config{
     bool to_lowercase;
     bool to_hash;
     bool preserve_last;
+    int max_levels;
     std::vector<std::string> deletions;
     std::vector<std::string> constants;
     std::map<std::string, std::string> replacements;
@@ -89,6 +90,10 @@ std::string join(const std::vector<std::string>& v, char delim = '.'){
             ss << *it;
     }
     return ss.str();
+}
+
+size_t get_levels(const std::string& domain){
+    return split(domain).size();
 }
 
 std::string replace_domain(const std::string &domain, const std::map<std::string, std::string> &replacements, const PConfig& config){
@@ -177,10 +182,11 @@ PConfig read_config(const char* path){
         for(auto& it: constants)
             config->constants.emplace_back(it.asString());
     }
-    if(!config_json.isMember("ToHash") || !config_json.isMember("PreserveLast"))
+    if(!config_json.isMember("ToHash") || !config_json.isMember("PreserveLast") || !config_json.isMember("MaxLevels"))
         return nullptr;
     config->preserve_last = config_json["PreserveLast"].asBool();
     config->to_hash = config_json["ToHash"].asBool();
+    config->max_levels = config_json["MaxLevels"].asInt();
     return config;
 }
 
@@ -263,7 +269,7 @@ int main(int argc, char** argv){
                 auto buffer = Buffer(new unsigned char[dns->getDataLen()], [](const unsigned char* p){delete []p;});
                 memcpy(buffer.get(), dns->getData(), dns->getDataLen());
                 auto delete_if_match = [&](const std::string& domain, const PConfig& config){
-                    if (plain_match(domain, config->deletions)) {
+                    if (get_levels(domain) > config->max_levels || plain_match(domain, config->deletions)) {
                         to_write = false;
                         to_delete.insert(dns->getDnsHeader()->transactionID);
                         return true;
@@ -286,7 +292,7 @@ int main(int argc, char** argv){
                     if(config->to_lowercase)
                         std::transform(domain.begin(), domain.end(), domain.begin(), ::tolower);
                     if (delete_if_match(domain, config))
-                        return -1L;
+                        return (long)len;
                     if(plain_match(domain, config->constants))
                         hashed = domain;
                     else
@@ -318,7 +324,7 @@ int main(int argc, char** argv){
                             case pcpp::DnsType::DNS_TYPE_SOA: {
                                 set_domain(answer, name_offset);
                                 if(has_data(answer)) {
-                                    auto len = (size_t) set_domain(answer, data_offset);
+                                    auto len = set_domain(answer, data_offset);
                                     set_domain(answer, data_offset + len);
                                 }else
                                     delete_if_match(answer->getName(), config);

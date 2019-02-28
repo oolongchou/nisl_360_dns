@@ -4,6 +4,7 @@
   "Deletions": [
     "arpa"
   ],
+  "MaxLevels" : 3,
   "Constants": [],
   "Replacements": {
     "edu.cn" : "com.cn"
