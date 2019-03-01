@@ -19,53 +19,11 @@ const char* Usage = \
 "Map all MAC address OUI to specific OUI (see oui.txt) and randomize last 24 bits if necessary.\n";
 
 typedef struct _config{
-    bool to_randomize;
-    u_int8_t oui[3];
+    pcpp::MacAddress from;
+    pcpp::MacAddress to;
 } Config;
 
 typedef std::shared_ptr<Config> PConfig;
-
-bool parse_oui(const std::string& oui, u_int8_t* buffer, size_t len){
-    size_t cnt = 0;
-    for(size_t i = 0; i < oui.length() && cnt < len;) {
-        auto next_semicolon = oui.find('-', i);
-        if(next_semicolon == std::string::npos)
-            next_semicolon = oui.length();
-        buffer[cnt] = (u_int8_t)strtol(oui.substr(i, next_semicolon - i).c_str(), nullptr, 16);
-        i = next_semicolon + 1;
-        cnt ++;
-    }
-    return cnt == len;
-}
-
-u_int32_t next_unique(){
-    static std::set<u_int32_t> pool;
-    static u_int32_t mask = (1 << 24) - 1;
-    std::random_device rd;
-    std::mt19937 g(rd());
-    u_int32_t next = g() & mask;
-    while(pool.count(next) == 1)
-        next = g();
-    pool.insert(next);
-    return next;
-}
-
-pcpp::MacAddress generate_next_mac(const pcpp::MacAddress& mac,const PConfig& config){
-    u_int8_t fourth, fifth, sixth;
-    if(config->to_randomize) {
-        u_int32_t last = next_unique();
-        fourth = (u_int8_t) (last & 0xFF);
-        fifth = (u_int8_t) (last & 0xFF00);
-        sixth = (u_int8_t) (last & 0xFF0000);
-    }else{
-        u_int8_t mac_addr[6];
-        mac.copyTo(mac_addr);
-        fourth = mac_addr[3];
-        fifth = mac_addr[4];
-        sixth = mac_addr[5];
-    }
-    return pcpp::MacAddress(config->oui[0], config->oui[1], config->oui[2], fourth, fifth, sixth);
-}
 
 PConfig read_config(const char* path){
     std::fstream fs(path, std::ios::in);
@@ -73,26 +31,16 @@ PConfig read_config(const char* path){
         return nullptr;
     }
     Json::Value config_json;
-    PConfig config(new Config);
     try{
         fs >> config_json;
     }catch (const std::exception& e){
         printf("%s\n", e.what());
         return nullptr;
     }
-    if(!config_json.isMember("Randomize"))
-        config->to_randomize = true;
-    else
-        config->to_randomize = config_json["Randomize"].asBool();
-    if(config_json.isMember("OUIReplace")){
-        u_int8_t oui[3];
-        if(!parse_oui(config_json["OUIReplace"].asString(), oui, 3))
-            return nullptr;
-        else
-            memcpy(config->oui, oui, 3);
-    }else
+    if(!config_json.isMember("From") || !config_json.isMember("To"))
         return nullptr;
-    return config;
+    else
+        return PConfig(new Config{config_json["From"].asString(), config_json["To"].asString()});
 }
 
 int main(int argc, char** argv) {
@@ -133,22 +81,19 @@ int main(int argc, char** argv) {
         pcpp::Packet pkt(&rpkt);
         auto eth = pkt.getLayerOfType<pcpp::EthLayer>();
         if(eth != nullptr) {
-            u_int8_t buffer[6];
-            auto src_mac = eth->getSourceMac();
-            if(mac_map.isMember(src_mac.toString()))
-                eth->setSourceMac(mac_map[src_mac.toString()].asString());
-            else {
-                auto new_mac = generate_next_mac(src_mac, config);
-                eth->setSourceMac(new_mac);
-                mac_map[src_mac.toString()] = new_mac.toString();
+            auto src_mac = eth->getSourceMac().toString();
+            auto dst_mac = eth->getDestMac().toString();
+            if(mac_map.isMember(src_mac))
+                eth->setSourceMac(pcpp::MacAddress(mac_map[src_mac].asString()));
+            else{
+                mac_map[src_mac] = config->from.toString();
+                eth->setSourceMac(config->from);
             }
-            auto dst_mac = eth->getDestMac();
-            if(mac_map.isMember(dst_mac.toString()))
-                eth->setDestMac(mac_map[dst_mac.toString()].asString());
-            else {
-                auto new_mac = generate_next_mac(dst_mac, config);
-                eth->setDestMac(new_mac);
-                mac_map[dst_mac.toString()] = new_mac.toString();
+            if(mac_map.isMember(dst_mac))
+                eth->setDestMac(pcpp::MacAddress(mac_map[dst_mac].asString()));
+            else{
+                mac_map[dst_mac] = config->to.toString();
+                eth->setDestMac(config->to);
             }
         }else
             printf("Warning: %lld packet doesn't have an eth layer.\n", count);

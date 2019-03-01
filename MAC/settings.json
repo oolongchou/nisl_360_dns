@@ -1,4 +1,4 @@
 {
-  "Randomize" :true,
-  "OUIReplace": "00-1C-14"
+  "From" :"00:1c:14:0e:92:2B",
+  "To": "00:1c:14:86:22:5A"
 }
