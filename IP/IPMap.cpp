@@ -6,7 +6,7 @@
 #include<map>
 #include<memory>
 #include<random>
-#include "RawPacket.h"
+#include<RawPacket.h>
 #include<Packet.h>
 #include<netinet/in.h>
 #include<IPv4Layer.h>
@@ -227,7 +227,6 @@ int main(int argc, char** argv) {
         }
         if(to_write) {
             write_count++;
-            rpkt.setRawDataLen(rpkt.getFrameLength());
             writer.writePacket(rpkt);
         }
     }
