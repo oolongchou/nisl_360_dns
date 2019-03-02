@@ -140,6 +140,7 @@ int main(int argc, char** argv){
 #endif
         }
         write_count++;
+        pkthdr->caplen = pkthdr->len;
         pcap_dump((u_char*)outputhandle, pkthdr, data);
     }
     pcap_close(inputhandle);

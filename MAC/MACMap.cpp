@@ -8,7 +8,7 @@
 #include<set>
 #include<map>
 #include<memory>
-#include<RawPacket.h>
+#include "RawPacket.h"
 #include<Packet.h>
 #include<EthLayer.h>
 #include<json/json.h>
@@ -98,6 +98,7 @@ int main(int argc, char** argv) {
         }else
             printf("Warning: %lld packet doesn't have an eth layer.\n", count);
         write_count++;
+        rpkt.setRawDataLen(rpkt.getFrameLength());
         writer.writePacket(rpkt);
     }
     fs << mac_map;
