@@ -1,6 +1,12 @@
 # nisl_360_dns
 dns_data_processing
 
+- Caplen ：调整不同pcap文件参数保证后续处理一致性
+- Mac:调整pcap文件mac地址，目前是统一替换，可使用配置文件进行修改
+- IP：IP地址随机映射，包含网络层源和目的IP地址，以及应用层中DNS协议包含的IP应答信息
+- Domain：域名哈希替换。后缀替换与子域名哈希截断替换
+- Checksum:校验和重算
+
 ## How to build
 
 ### Dependency
@@ -39,8 +45,4 @@ cd Release
 cmake -DCMAKE_BUILD_TYPE=Release ..
 make
 ```
-Caplen ：调整不同pcap文件参数保证后续处理一致性
-Mac:调整pcap文件mac地址，目前是统一替换，可使用配置文件进行修改
-IP：IP地址随机映射，包含网络层源和目的IP地址，以及应用层中DNS协议包含的IP应答信息
-Domain：域名哈希替换。后缀替换与子域名哈希截断替换
-Checksum:校验和重算
+
