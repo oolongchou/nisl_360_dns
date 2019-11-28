@@ -1,4 +1,4 @@
-# nisl_360_dns
+# DNS恶意流量匿名化处理V1.0
 dns_data_processing
 
 - Caplen ：调整不同pcap文件参数保证后续处理一致性
